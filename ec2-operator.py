@@ -1,15 +1,19 @@
 #!/usr/bin/python
 
 import datetime
+import json
+import sys
+import random
 
 import boto3
 import croniter
 
-# regions = ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
-#           "ap-northeast-1", "ca-central-1", "eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3", "eu-north-1",
-#           "sa-east-1"]
+regions = ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
+           "ap-northeast-1", "ca-central-1", "eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3", "eu-north-1",
+           "sa-east-1"]
 
-regions = ["us-east-1"]
+
+# regions = ["us-east-2"]
 
 
 # return true if the cron schedule falls between now and now+seconds
@@ -23,78 +27,98 @@ def time_to_action(ec2_schedule, time_now, seconds):
         else:
             d2 = cron.get_prev(datetime.datetime)
             ret = (d1 < d2 < time_now)
-        print("now %s" % time_now)
-        print("d1 %s" % d1)
-        print("d2 %s" % d2)
+        # print("now %s" % time_now)
+        # print("d1 %s" % d1)
+        # print("d2 %s" % d2)
     except:
         ret = False
     print("time_to_action %s" % ret)
     return ret
 
 
-# time_to_action("0 0 * * SAT", now, 31 * 60)
+def log_cloudwatch_metrics(instance_name, instance_id, ec2_region, launch_time, desired_state):
+    cloudwatch_client = boto3.client('cloudwatch', region_name=region)
+    response = cloudwatch_client.put_metric_data(
+        Namespace='EC2 Operator',
+        MetricData=[
+            {
+                'MetricName': desired_state + ' Instance',
+                'Dimensions': [
+                    {
+                        'Name': 'Instance Name',
+                        'Value': instance_name
+                    },
+                    {
+                        'Name': 'Instance Id',
+                        'Value': instance_id
+                    },
+                    {
+                        'Name': 'Instance Region',
+                        'Value': ec2_region
+                    },
+                    {
+                        'Name': 'Instance Launch Time',
+                        'Value': launch_time
+                    },
+                ],
+                'Value': random.randint(1, 500),
+                'Unit': 'None'
+            },
+        ]
+    )
+    print(response)
+
 
 now = datetime.datetime.now()
+print('Script exec time is ' + now.strftime("%m-%d-%Y, %H:%M:%S") + ' and python version used is ' + sys.version + '!')
 instances = []
 for region in regions:
-    try:
-        ec2 = boto3.resource('ec2', region_name=region)
-        print('region={}'.format(region))
-        start_list = []
-        stop_list = []
-        instances = ec2.instances.filter(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
-        for instance in instances:
-            for tag in instance.tags:
-                if 'Name' in tag['Key']:
-                    name = tag['Value']
-                else:
-                    name = 'Unknown'
 
-                # check auto:start and auto:stop tags
-                if 'auto:start' in tag['Key']:
-                    start_schedule = tag['Value']
-                else:
-                    start_schedule = None
+    ec2 = boto3.resource('ec2', region_name=region)
+    start_list = []
+    stop_list = []
+    instances = ec2.instances.filter(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+    for instance in instances:
+        state = instance.state['Name']
+        print(instance.id, region)
+        tags = []
+        if instance.tags is not None:
+            tags = instance.tags
+        for tag in tags:
+            if 'Name' in tag['Key']:
+                name = tag['Value']
+            else:
+                name = 'Unknown'
 
-                if 'auto:stop' in tag['Key']:
-                    stop_schedule = tag['Value']
-                else:
-                    stop_schedule = None
+            # check auto:start and auto:stop tags
+            if 'auto:start' in tag['Key'] and state == 'stopped':
+                defined_schedule = tag['Value']
+                if time_to_action(defined_schedule, now, 31 * 60):
+                    start_list.append(instance.id)
+                    log_cloudwatch_metrics(name, instance.id, region,
+                                           datetime.datetime.now().strftime("%m-%d-%Y, %H:%M:%S"), 'Started')
 
-            state = instance.state['Name']
-            #  print('region={}'.format(region), 'instance-name={}'.format(name),
-            #        'instance-type={}'.format(instance.instance_type), 'instance-id={}'.format(instance.id),
-            #        'instance-state={}'.format(state))
-            print('instance-launch-time={}'.format(instance.launch_time))
-            print('instance-tags={}'.format(instance.tags))
-            # print("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" %  name, instance.id, instance.instance_type,
-            #     instance.launch_time, state, start_schedule, stop_schedule, instance.tags)
+            if 'auto:stop' in tag['Key'] and state == 'running':
+                defined_schedule = tag['Value']
+                if time_to_action(defined_schedule, now, 31 * 60):
+                    stop_list.append(instance.id)
+                    log_cloudwatch_metrics(name, instance.id, region,
+                                           instance.launch_time.strftime("%m-%d-%Y, %H:%M:%S"), 'Stopped')
 
-            # queue up instances that have the start time falls between now and the next 30 minutes
-            # Starting instances won't work as the filter specifically is looking for running instances and
-            # will not find anything to start. This is as-designed at this time.
+    #        print(instance.id, instance.tags)
 
-            if start_schedule is not None and state == "stopped" and time_to_action(start_schedule, now, 31 * 60):
-                start_list.append(instance.id)
+    # start instances
+    client = boto3.client('ec2', region_name=region)
 
-            # queue up instances that have the stop time falls between 30 minutes ago and now
-            # if stop_schedule != None and state == "running" and time_to_action(stop_schedule, now, 31 * -60):
-            if stop_schedule is not None and state == "running":
-                stop_list.append(instance.id)
+    if len(start_list) > 0:
+        print('start_list={}'.format(start_list))
+        ret = client.start_instances(InstanceIds=start_list, DryRun=False)
+        print("start_instances %s" % ret)
 
-        # start instances
-        client = boto3.client('ec2', region_name=region)
-        if len(start_list) > 0:
-            print('start_list={}'.format(start_list))
-            ret = client.start_instances(InstanceIds=start_list, DryRun=False)
-            print("start_instances %s" % ret)
-
-        # stop instances
-        if len(stop_list) > 0:
-            print('stop_list={}'.format(stop_list))
-            ret = client.stop_instances(InstanceIds=stop_list, DryRun=False)
-            print("stop_instances %s" % ret)
-
-    # most likely will get exception on new beta region and gov cloud
-    except Exception as e:
-        print('Error {}}', e)
+    # stop instances
+    if len(stop_list) > 0:
+        print('stop_list={}'.format(stop_list))
+        ret = client.stop_instances(InstanceIds=stop_list, DryRun=False)
+        print("stop_instances %s" % ret)
+now = datetime.datetime.now()
+print('Script exec time is ' + now.strftime("%m-%d-%Y, %H:%M:%S") + ' and python version used is ' + sys.version + '!')

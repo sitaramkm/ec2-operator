@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/ec2-operator.iml" filepath="$PROJECT_DIR$/.idea/ec2-operator.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../resource-auto-tagger/.idea/resource-auto-tagger.iml" filepath="$PROJECT_DIR$/../resource-auto-tagger/.idea/resource-auto-tagger.iml" />
+    </modules>
+  </component>
+</project>
